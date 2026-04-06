@@ -110,8 +110,8 @@ def cod_op_ventas(t):
     return 'R' if str(t).strip().split('.')[0] in CODIGOS_NC_VENTAS else ' '
 
 def cod_op_compras(t):
-    """'A' para NC de compras, '0' para el resto. Confirmado por plantilla referencia."""
-    return 'A' if str(t).strip().split('.')[0] in CODIGOS_NC_COMPRAS else '0'
+    """' ' (espacio) para compras normales, 'A' para NC. Confirmado por TXT real que funcionó en ARCA."""
+    return 'A' if str(t).strip().split('.')[0] in CODIGOS_NC_COMPRAS else ' '
 
 def moneda_txt(m):
     return MONEDAS.get(str(m).strip(), 'PES')
@@ -293,19 +293,26 @@ def generar_compras(rows):
 
 # ─── LECTORES ─────────────────────────────────────────────────────────────────
 
-def leer_xls_contabilium(uploaded_file):
-    """Plantilla XLS/XLSX de Contabilium. Campo Número = PPPPP-NNNNNNN."""
+def _xls_to_xlsx(uploaded_file):
+    """Convierte XLS a XLSX si es necesario y devuelve la ruta."""
     ext = os.path.splitext(uploaded_file.name)[1].lower()
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
         tmp.write(uploaded_file.getvalue())
         tmp_path = tmp.name
-
     if ext == '.xls':
         out_dir = tempfile.mkdtemp()
         os.system(f'libreoffice --headless --convert-to xlsx "{tmp_path}" --outdir "{out_dir}" 2>/dev/null')
         base = os.path.splitext(os.path.basename(tmp_path))[0]
         tmp_path = os.path.join(out_dir, base + '.xlsx')
+    return tmp_path
 
+
+def leer_xls_ventas(uploaded_file):
+    """
+    Plantilla XLS/XLSX de VENTAS de Contabilium.
+    Hoja 'Comprobantes'. Nro. Documento / Cuit = CUIT del COMPRADOR.
+    """
+    tmp_path = _xls_to_xlsx(uploaded_file)
     df = pd.read_excel(tmp_path, sheet_name='Comprobantes', dtype=str).fillna('')
 
     rows = []
@@ -340,6 +347,88 @@ def leer_xls_contabilium(uploaded_file):
     return rows
 
 
+def leer_xls_compras(uploaded_file):
+    """
+    Plantilla XLS de COMPRAS ('Planilla Tango' u hoja con datos de proveedores).
+    Columnas: FECHA, TIPO COMPROBANTE, LETRA, SUCURSAL, COMPROBANTE,
+              NOMBRE PROVEEDOR, CUIT (del proveedor/vendedor),
+              NETO GRAV_21, 0.21 (IVA 21%), TOTAL FACTURADO.
+    """
+    tmp_path = _xls_to_xlsx(uploaded_file)
+
+    # Intentar hoja 'Planilla Tango' primero, luego 'Comprobantes'
+    try:
+        df = pd.read_excel(tmp_path, sheet_name='Planilla Tango', dtype=str).fillna('')
+        fuente = 'Planilla Tango'
+    except Exception:
+        df = pd.read_excel(tmp_path, sheet_name=0, dtype=str).fillna('')
+        fuente = 'hoja 1'
+
+    # Mapeo de tipos de comprobante texto → código AFIP
+    TIPOS_MAP = {
+        'FACTURA A': '1', 'FACTURA B': '6', 'FACTURA C': '11',
+        'NOTA DEBITO A': '2', 'NOTA DEBITO B': '7', 'NOTA DEBITO C': '12',
+        'NOTA CREDITO A': '3', 'NOTA CREDITO B': '8', 'NOTA CREDITO C': '13',
+        'FACTURA': '1',  # default si solo dice FACTURA sin letra
+    }
+
+    rows = []
+    for _, r in df.iterrows():
+        # Tipo: combinar TIPO COMPROBANTE + LETRA
+        tipo_txt = str(r.get('TIPO COMPROBANTE','')).strip().upper()
+        letra    = str(r.get('LETRA','')).strip().upper()
+        clave    = f'{tipo_txt} {letra}'.strip() if letra else tipo_txt
+        tipo_afip = TIPOS_MAP.get(clave, TIPOS_MAP.get(tipo_txt, '1'))
+
+        # Punto de venta y número
+        pto = str(r.get('SUCURSAL','1')).strip().split('.')[0]
+        nro = str(r.get('COMPROBANTE','')).strip().split('.')[0]
+
+        # CUIT del PROVEEDOR (vendedor) — no del comprador
+        cuit_raw = str(r.get('CUIT','')).strip()
+        try:    cuit_raw = str(int(float(cuit_raw))) if cuit_raw else '0'
+        except: cuit_raw = '0'
+
+        # IVA 21% — la columna se llama 0.21 en la Planilla Tango
+        iva21_cols  = [0.21, '0.21', 'IVA 21%', 'IVA_21', 'IVA 21']
+        neto21_cols = ['NETO GRAV_21', 'BASE GRAVADA', 'Neto Gravado 21']
+        iva21  = '0'
+        neto21 = '0'
+        for c in iva21_cols:
+            if c in r.index and str(r[c]).strip() not in ('','nan'):
+                iva21 = str(r[c]).strip(); break
+        for c in neto21_cols:
+            if c in r.index and str(r[c]).strip() not in ('','nan'):
+                neto21 = str(r[c]).strip(); break
+
+        total_cols = ['TOTAL FACTURADO', 'Total', 'TOTAL']
+        total = '0'
+        for c in total_cols:
+            if c in r.index and str(r[c]).strip() not in ('','nan'):
+                total = str(r[c]).strip(); break
+
+        rows.append({
+            'Fecha':                     str(r.get('FECHA','')).strip()[:10],
+            'Tipo de Comprobante':       tipo_afip,
+            'Punto de Venta':            pto.lstrip('0') or '0',
+            'Número Desde':              nro.lstrip('0') or '0',
+            'Tipo Doc. Vendedor':        '80',
+            'Nro. Doc. Vendedor':        cuit_raw,
+            'Denominación Vendedor':     str(r.get('NOMBRE PROVEEDOR','')).strip(),
+            'Tipo Cambio':               '1',
+            'Moneda':                    '$',
+            'IVA 21%':                   iva21,
+            'Imp. Neto Gravado IVA 21%': neto21,
+            'Imp. Neto Gravado Total':   neto21,
+            'Imp. Neto No Gravado':      '0',
+            'Imp. Op. Exentas':          '0',
+            'Otros Tributos':            '0',
+            'Total IVA':                 iva21,
+            'Imp. Total':                total,
+        })
+    return rows, fuente
+
+
 def leer_csv_afip(uploaded_file):
     """CSV del portal AFIP. Fila 0 col 0 = CUIT, resto = headers."""
     content = uploaded_file.read().decode('utf-8-sig')
@@ -360,11 +449,21 @@ def leer_csv_afip(uploaded_file):
         return [dict(r) for r in reader if any(v.strip() for v in r.values())]
 
 
-def leer_archivo(uploaded_file):
+def leer_archivo_ventas(uploaded_file):
+    """Auto-detecta formato para VENTAS."""
     ext = os.path.splitext(uploaded_file.name)[1].lower()
-    if ext in ('.xls','.xlsx'):
-        return leer_xls_contabilium(uploaded_file), 'Excel (Contabilium)'
-    return leer_csv_afip(uploaded_file), 'CSV AFIP'
+    if ext in ('.xls', '.xlsx'):
+        return leer_xls_ventas(uploaded_file), 'Excel Ventas (Contabilium)'
+    return leer_csv_afip(uploaded_file), 'CSV AFIP Ventas'
+
+
+def leer_archivo_compras(uploaded_file):
+    """Auto-detecta formato para COMPRAS."""
+    ext = os.path.splitext(uploaded_file.name)[1].lower()
+    if ext in ('.xls', '.xlsx'):
+        rows, fuente = leer_xls_compras(uploaded_file)
+        return rows, f'Excel Compras ({fuente})'
+    return leer_csv_afip(uploaded_file), 'CSV AFIP Compras'
 
 
 def lineas_a_bytes(lines):
@@ -454,7 +553,7 @@ if st.button("🚀 GENERAR ARCHIVOS TXT", disabled=(file_v is None)):
 
     with st.spinner("Procesando..."):
         try:
-            rows_v, fmt_v = leer_archivo(file_v)
+            rows_v, fmt_v = leer_archivo_ventas(file_v)
             periodo = periodo_manual.strip() if periodo_manual.strip() else detectar_periodo(rows_v)
 
             cbte_v, alic_v, err_v = generar_ventas(rows_v)
@@ -464,7 +563,7 @@ if st.button("🚀 GENERAR ARCHIVOS TXT", disabled=(file_v is None)):
 
             fmt_c, n_compras = '', 0
             if file_c:
-                rows_c, fmt_c = leer_archivo(file_c)
+                rows_c, fmt_c = leer_archivo_compras(file_c)
                 n_compras = len(rows_c)
                 cbte_c, alic_c, err_c = generar_compras(rows_c)
                 todos_errores.extend(err_c)
