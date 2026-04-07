@@ -430,23 +430,59 @@ def leer_xls_compras(uploaded_file):
 
 
 def leer_csv_afip(uploaded_file):
-    """CSV del portal AFIP. Fila 0 col 0 = CUIT, resto = headers."""
-    content = uploaded_file.read().decode('utf-8-sig')
-    sep = ';' if content.count(';') > content.count(',') else ','
-    all_lines = [l for l in content.splitlines() if l.strip()]
+    """
+    Lee CSV de comprobantes del portal AFIP. Maneja 3 variantes:
+    A) Fila 0: CUIT + headers en misma fila (col 0 = CUIT numérico de 11 dígitos)
+       → fecha en col 0 de cada fila de datos
+    B) Fila 0: solo CUIT, fila 1: headers reales
+    C) Fila 0: headers directamente (sin fila de CUIT)
+       → fecha en columna 'Fecha de Emisión' o 'Fecha'
+    """
+    raw = uploaded_file.read().decode('utf-8-sig')
+    sep = ';' if raw.count(';') > raw.count(',') else ','
+    all_lines = [l for l in raw.splitlines() if l.strip()]
 
-    first_col = all_lines[0].split(sep)[0].strip()
-    if first_col.isdigit() and len(first_col) == 11:
+    # Quitar comillas de los headers
+    def clean(s): return s.strip().strip('"').strip()
+
+    first_cols = [clean(c) for c in all_lines[0].split(sep)]
+    col0 = first_cols[0]
+
+    # Variante A: col0 es CUIT numérico de 11 dígitos Y col1 parece header de texto
+    if col0.isdigit() and len(col0) == 11 and len(first_cols) > 1 and not first_cols[1].replace(',','').replace('.','').isdigit():
         reader = csv.DictReader(all_lines, delimiter=sep)
         rows = []
         for row in reader:
             fecha_key = list(row.keys())[0]
-            row['Fecha'] = row[fecha_key]
-            rows.append(dict(row))
+            row['Fecha'] = clean(row[fecha_key])
+            rows.append({clean(k): clean(v) for k, v in row.items()})
         return rows
-    else:
-        reader = csv.DictReader(all_lines, delimiter=sep)
-        return [dict(r) for r in reader if any(v.strip() for v in r.values())]
+
+    # Variante B: col0 es solo CUIT, fila 1 tiene headers reales
+    if col0.isdigit() and len(col0) == 11 and len(first_cols) == 1:
+        reader = csv.DictReader(all_lines[1:], delimiter=sep)
+        rows = []
+        for row in reader:
+            if not any(v.strip() for v in row.values()): continue
+            rows.append({clean(k): clean(v) for k, v in row.items()})
+        return rows
+
+    # Variante C: arranca directo con headers (sin fila de CUIT)
+    # La fecha puede estar en 'Fecha de Emisión' o 'Fecha'
+    reader = csv.DictReader(all_lines, delimiter=sep)
+    rows = []
+    FECHA_COLS = ['Fecha de Emisión', 'Fecha de emision', 'Fecha', 'FECHA', 'fecha']
+    for row in reader:
+        if not any(v.strip() for v in row.values()): continue
+        r = {clean(k): clean(v) for k, v in row.items()}
+        # Mapear la columna de fecha al nombre estándar que usa generar_ventas
+        if 'Fecha' not in r:
+            for fc in FECHA_COLS:
+                if fc in r and r[fc]:
+                    r['Fecha'] = r[fc]
+                    break
+        rows.append(r)
+    return rows
 
 
 def leer_archivo_ventas(uploaded_file):
