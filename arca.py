@@ -165,8 +165,15 @@ def generar_ventas(rows):
             nro_hasta = fmt_num(row.get('Número Hasta', nro_desde), 20)
             # cod_doc: leer del archivo, no hardcodear a 80
             cod_doc   = fmt_num(row.get('Tipo Doc. Receptor', 99), 2)
-            nro_id    = nro_doc(row.get('Nro. Doc. Receptor', 0))
-            nombre    = fmt_alfa(row.get('Denominación Receptor',''), 30)
+            # Para consumidor final (cod_doc 99/96): nro_id = zeros, nombre fijo
+            _nro_raw  = str(row.get('Nro. Doc. Receptor', '0') or '0').strip()
+            _nom_raw  = str(row.get('Denominación Receptor', '') or '').strip()
+            if cod_doc in ('96', '99') and (_nro_raw in ('', '0') or not _nom_raw):
+                nro_id = '0' * 20
+                nombre = fmt_alfa('VENTAS DEL DIA', 30)
+            else:
+                nro_id = nro_doc(_nro_raw)
+                nombre = fmt_alfa(_nom_raw, 30)
             moneda    = moneda_txt(row.get('Moneda','$'))
             tc        = tipo_cambio_txt(row.get('Tipo Cambio','1'))
 
@@ -468,19 +475,25 @@ def leer_csv_afip(uploaded_file):
         return rows
 
     # Variante C: arranca directo con headers (sin fila de CUIT)
-    # La fecha puede estar en 'Fecha de Emisión' o 'Fecha'
+    # Puede ser CSV de emitidos (ventas) o recibidos (compras)
     reader = csv.DictReader(all_lines, delimiter=sep)
     rows = []
     FECHA_COLS = ['Fecha de Emisión', 'Fecha de emision', 'Fecha', 'FECHA', 'fecha']
     for row in reader:
         if not any(v.strip() for v in row.values()): continue
         r = {clean(k): clean(v) for k, v in row.items()}
-        # Mapear la columna de fecha al nombre estándar que usa generar_ventas
+        # Normalizar columna de fecha
         if 'Fecha' not in r:
             for fc in FECHA_COLS:
                 if fc in r and r[fc]:
                     r['Fecha'] = r[fc]
                     break
+        # CSV de COMPRAS RECIBIDOS: el proveedor es el Emisor
+        # Mapear a los nombres que usa generar_compras
+        if 'Nro. Doc. Emisor' in r:
+            r['Tipo Doc. Vendedor']     = r.get('Tipo Doc. Emisor', '80')
+            r['Nro. Doc. Vendedor']     = r.get('Nro. Doc. Emisor', '0')
+            r['Denominación Vendedor']  = r.get('Denominación Emisor', '')
         rows.append(r)
     return rows
 
