@@ -168,9 +168,13 @@ def generar_ventas(rows):
             # Para consumidor final (cod_doc 99/96): nro_id = zeros, nombre fijo
             _nro_raw  = str(row.get('Nro. Doc. Receptor', '0') or '0').strip()
             _nom_raw  = str(row.get('Denominación Receptor', '') or '').strip()
+            # cod_doc 99 = consumidor final sin datos
+            # cod_doc 96 = DNI presente pero ARCA exige que si el DNI viene en 0
+            #              se trate igual que consumidor final (código 99)
             if cod_doc in ('96', '99') and (_nro_raw in ('', '0') or not _nom_raw):
-                nro_id = '0' * 20
-                nombre = fmt_alfa('VENTAS DEL DIA', 30)
+                cod_doc = '99'          # normalizar a 99
+                nro_id  = '0' * 20
+                nombre  = fmt_alfa('VENTAS DEL DIA', 30)
             else:
                 nro_id = nro_doc(_nro_raw)
                 nombre = fmt_alfa(_nom_raw, 30)
@@ -186,7 +190,9 @@ def generar_ventas(rows):
             # Confirmado por plantilla de referencia del cliente
             cod_op     = cod_op_ventas(tipo)
             alics      = _alics(row)
-            cant_alic  = str(len(alics)) if alics else '1'
+            # Si no hay alícuotas (factura exenta, no gravada, o solo IVA=0)
+            # cant_alic = 0 y NO se genera línea en el archivo de alícuotas
+            cant_alic  = str(len(alics)) if alics else '0'
 
             # ── VENTAS CBTE: 266 chars ───────────────────────────────────
             # C1  fecha(8)  C2  tipo(3)   C3  pto(5)      C4  nro_desde(20)
