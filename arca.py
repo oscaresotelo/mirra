@@ -193,9 +193,20 @@ def generar_ventas(rows):
             # Confirmado por plantilla de referencia del cliente
             cod_op     = cod_op_ventas(tipo)
             alics      = _alics(row)
-            # Si no hay alícuotas (factura exenta, no gravada, o solo IVA=0)
-            # cant_alic = 0 y NO se genera línea en el archivo de alícuotas
-            cant_alic  = str(len(alics)) if alics else '0'
+
+            # VENTAS: cant_alic SIEMPRE debe ser >= 1 (ARCA rechaza cant_alic=0)
+            # Si no hay IVA pero hay importe exento → generar alícuota con código 0003 (exento)
+            # y marcar cod_op = 'E' (operación exenta)
+            if not alics:
+                _exentas_v = to_decimal(row.get('Imp. Op. Exentas', 0))
+                _total_v   = to_decimal(row.get('Imp. Total', 0))
+                _importe_exento = _exentas_v if _exentas_v != 0 else _total_v
+                if _importe_exento != 0:
+                    alics  = [('0', _importe_exento, Decimal('0'))]
+                    cod_op = 'E'   # Código de operación exenta según tabla ARCA
+                else:
+                    alics  = []
+            cant_alic = str(len(alics)) if alics else '1'
 
             # ── VENTAS CBTE: 266 chars ───────────────────────────────────
             # C1  fecha(8)  C2  tipo(3)   C3  pto(5)      C4  nro_desde(20)
