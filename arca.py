@@ -168,16 +168,19 @@ def generar_ventas(rows):
             # Para consumidor final (cod_doc 99/96): nro_id = zeros, nombre fijo
             _nro_raw  = str(row.get('Nro. Doc. Receptor', '0') or '0').strip()
             _nom_raw  = str(row.get('Denominación Receptor', '') or '').strip()
-            # cod_doc 99 = consumidor final sin datos
-            # cod_doc 96 = DNI presente pero ARCA exige que si el DNI viene en 0
-            #              se trate igual que consumidor final (código 99)
-            if cod_doc in ('96', '99') and (_nro_raw in ('', '0') or not _nom_raw):
-                cod_doc = '99'          # normalizar a 99
+            # Determinar si el número de documento es válido para ARCA:
+            # - cod_doc 99: siempre consumidor final, nro debe ser 0
+            # - cod_doc 96 (DNI): el nro debe ser un DNI real (7-8 dígitos, no 0 ni 99999999)
+            #   Si AFIP exporta 99999999 significa que no se identificó → tratar como 99
+            _nro_digits = _nro_raw.lstrip('0')
+            _dni_invalido = _nro_raw in ('', '0', '99999999') or len(_nro_digits) < 7
+            if cod_doc == '99' or (cod_doc == '96' and _dni_invalido):
+                cod_doc = '99'
                 nro_id  = '0' * 20
                 nombre  = fmt_alfa('VENTAS DEL DIA', 30)
             else:
                 nro_id = nro_doc(_nro_raw)
-                nombre = fmt_alfa(_nom_raw, 30)
+                nombre = fmt_alfa(_nom_raw if _nom_raw else 'VENTAS DEL DIA', 30)
             moneda    = moneda_txt(row.get('Moneda','$'))
             tc        = tipo_cambio_txt(row.get('Tipo Cambio','1'))
 
