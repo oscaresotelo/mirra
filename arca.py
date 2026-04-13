@@ -1,7 +1,26 @@
+"""
+MIRRA — Generador Libro IVA Digital (ARCA/AFIP)
+Acepta: CSV de comprobantes emitidos (ventas) | CSV de comprobantes recibidos (compras)
+        Plantilla XLS/XLSX de Contabilium (ventas) | Planilla Tango XLS (compras)
+Genera: 4 archivos TXT en formato ARCA — posiciones fijas, encoding Latin-1
+
+Historial de fixes:
+  v1 - Versión inicial
+  v2 - cod_op ventas=' ', compras='0' (confirmado con TXT reales)
+  v3 - leer_csv_afip: soporta 3 variantes (CUIT+headers, solo CUIT, headers directos)
+  v4 - Fecha: soporta todos los formatos (DD/MM/YYYY, YYYY-MM-DD, 20260101, etc.)
+  v5 - Compras: leer Emisor (proveedor) en lugar de Receptor
+  v6 - Compras: cant_alic=0 para facturas sin IVA (exentas)
+  v7 - Ventas: cod_doc=96 con DNI 99999999/0 → normalizar a cod_doc=99
+  v8 - Ventas: facturas exentas → alícuota 0003 (cant_alic siempre >= 1)
+  v9 - Encoding: Latin-1 + transliteración (ñ, tildes) — ARCA rechaza UTF-8
+  v10- CUIT: validar dígito verificador, advertir si inválido
+"""
+
 import streamlit as st
 import pandas as pd
 import csv
-import os, io, tempfile, zipfile
+import os, io, tempfile, zipfile, unicodedata
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 
@@ -69,10 +88,8 @@ ALICUOTA_COLS = [
 ]
 
 MONEDAS    = {'$':'PES', 'U$S':'DOL', 'PES':'PES', 'DOL':'DOL'}
-# Notas de crédito → cod_op = 'R' en ventas / 'A' en compras
-# Para comprobantes normales → cod_op = '0' (confirmado por plantilla de referencia ARCA)
-CODIGOS_NC_VENTAS  = {'3', '8', '13', '21', '53'}
-CODIGOS_NC_COMPRAS = {'3', '8', '13', '21', '53'}
+CODIGOS_NC_VENTAS  = {'3','8','13','21','53'}
+CODIGOS_NC_COMPRAS = {'3','8','13','21','53'}
 
 # ─── HELPERS ─────────────────────────────────────────────────────────────────
 
@@ -83,7 +100,6 @@ def to_decimal(s):
     except: return Decimal('0')
 
 def fmt_importe(valor):
-    """13 enteros + 2 decimales implícitos, sin punto decimal, relleno con ceros."""
     d = Decimal(str(valor)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
     return str(abs(d)).replace('.','').zfill(15)
 
@@ -96,8 +112,10 @@ def fmt_alfa(valor, largo):
     return s[:largo].ljust(largo)
 
 def parse_fecha(s):
-    s = str(s).strip()[:10]
-    for fmt in ('%d/%m/%Y','%Y-%m-%d','%d-%m-%Y'):
+    s = str(s).strip()
+    if len(s) == 8 and s.isdigit(): return s
+    s = s[:10]
+    for fmt in ('%d/%m/%Y','%Y-%m-%d','%d-%m-%Y','%Y/%m/%d','%d/%m/%y','%d-%m-%y'):
         try:    return datetime.strptime(s, fmt).strftime('%Y%m%d')
         except: pass
     return '00000000'
@@ -106,11 +124,9 @@ def tipo_cbte_txt(t):
     return TIPOS_CBTE.get(str(t).strip().split('.')[0], str(t).zfill(3))
 
 def cod_op_ventas(t):
-    """' ' (espacio) para ventas normales, 'R' para NC. Confirmado por TXT que funcionó en ARCA."""
     return 'R' if str(t).strip().split('.')[0] in CODIGOS_NC_VENTAS else ' '
 
 def cod_op_compras(t):
-    """' ' (espacio) para compras normales, 'A' para NC. Confirmado por TXT real que funcionó en ARCA."""
     return 'A' if str(t).strip().split('.')[0] in CODIGOS_NC_COMPRAS else ' '
 
 def moneda_txt(m):
@@ -124,6 +140,22 @@ def tipo_cambio_txt(tc):
 
 def nro_doc(n, largo=20):
     return ''.join(c for c in str(n or '') if c.isdigit()).zfill(largo)
+
+def verificar_cuit(cuit_str):
+    """Verifica el dígito verificador del CUIT. Retorna True si es válido."""
+    digits = ''.join(c for c in str(cuit_str or '') if c.isdigit())
+    if len(digits) != 11:
+        return False
+    pesos = [5,4,3,2,7,6,5,4,3,2]
+    suma  = sum(int(digits[i]) * pesos[i] for i in range(10))
+    resto = suma % 11
+    dv_calc = 0 if resto == 0 else (9 if resto == 1 else 11 - resto)
+    return dv_calc == int(digits[10])
+
+def transliterar(s):
+    """Convierte caracteres no-ASCII a su equivalente ASCII (ñ→n, tildes→sin tilde)."""
+    nfd = unicodedata.normalize('NFD', str(s))
+    return ''.join(c for c in nfd if unicodedata.category(c) != 'Mn')
 
 def detectar_periodo(rows):
     for row in rows:
@@ -149,11 +181,7 @@ def _alics(row):
 # ─── GENERADORES ─────────────────────────────────────────────────────────────
 
 def generar_ventas(rows):
-    """
-    VENTAS_CBTE: 266 chars exactos por línea.
-    VENTAS_ALICUOTAS: 62 chars exactos por línea.
-    Spec ARCA — posiciones fijas confirmadas con plantilla de referencia.
-    """
+    """VENTAS_CBTE (266 chars) + VENTAS_ALICUOTAS (62 chars)."""
     cbte_lines, alic_lines, errores = [], [], []
 
     for i, row in enumerate(rows):
@@ -163,60 +191,55 @@ def generar_ventas(rows):
             pto_vta   = fmt_num(row.get('Punto de Venta',  0), 5)
             nro_desde = fmt_num(row.get('Número Desde',    0), 20)
             nro_hasta = fmt_num(row.get('Número Hasta', nro_desde), 20)
-            # cod_doc: leer del archivo, no hardcodear a 80
-            cod_doc   = fmt_num(row.get('Tipo Doc. Receptor', 99), 2)
-            # Para consumidor final (cod_doc 99/96): nro_id = zeros, nombre fijo
-            _nro_raw  = str(row.get('Nro. Doc. Receptor', '0') or '0').strip()
-            _nom_raw  = str(row.get('Denominación Receptor', '') or '').strip()
-            # Determinar si el número de documento es válido para ARCA:
-            # - cod_doc 99: siempre consumidor final, nro debe ser 0
-            # - cod_doc 96 (DNI): el nro debe ser un DNI real (7-8 dígitos, no 0 ni 99999999)
-            #   Si AFIP exporta 99999999 significa que no se identificó → tratar como 99
-            _nro_digits = _nro_raw.lstrip('0')
-            _dni_invalido = _nro_raw in ('', '0', '99999999') or len(_nro_digits) < 7
-            if cod_doc == '99' or (cod_doc == '96' and _dni_invalido):
-                cod_doc = '99'
-                nro_id  = '0' * 20
-                nombre  = fmt_alfa('VENTAS DEL DIA', 30)
-            else:
-                nro_id = nro_doc(_nro_raw)
-                nombre = fmt_alfa(_nom_raw if _nom_raw else 'VENTAS DEL DIA', 30)
             moneda    = moneda_txt(row.get('Moneda','$'))
             tc        = tipo_cambio_txt(row.get('Tipo Cambio','1'))
 
+            # Código de documento y número de identificación
+            cod_doc   = fmt_num(row.get('Tipo Doc. Receptor', 99), 2)
+            _nro_raw  = str(row.get('Nro. Doc. Receptor', '0') or '0').strip()
+            _nom_raw  = str(row.get('Denominación Receptor', '') or '').strip()
+
+            _nro_digits  = _nro_raw.lstrip('0')
+            _dni_invalido = _nro_raw in ('','0','99999999') or len(_nro_digits) < 7
+
+            if cod_doc == '99' or (cod_doc == '96' and _dni_invalido):
+                # Consumidor final sin identificación
+                cod_doc = '99'
+                nro_id  = '0' * 20
+                nombre  = fmt_alfa('VENTAS DEL DIA', 30)
+            elif cod_doc == '80' and not verificar_cuit(_nro_raw):
+                # CUIT con dígito verificador inválido
+                nro_id = '0' * 20
+                nombre = fmt_alfa(_nom_raw, 30)
+                errores.append(f'Fila {i+1}: CUIT {_nro_raw} inválido ({_nom_raw}) — se puso ceros')
+            else:
+                nro_id = nro_doc(_nro_raw)
+                nombre = fmt_alfa(_nom_raw if _nom_raw else 'VENTAS DEL DIA', 30)
+
+            # Importes
             total      = fmt_importe(to_decimal(row.get('Imp. Total',           0)))
             no_gravado = fmt_importe(to_decimal(row.get('Imp. Neto No Gravado', 0)))
             exentas    = fmt_importe(to_decimal(row.get('Imp. Op. Exentas',     0)))
             otros_trib = fmt_importe(to_decimal(row.get('Otros Tributos',       0)))
             cero15     = fmt_importe(0)
-            # cod_op = '0' para comprobantes normales, 'R' para NC
-            # Confirmado por plantilla de referencia del cliente
             cod_op     = cod_op_ventas(tipo)
-            alics      = _alics(row)
 
-            # VENTAS: cant_alic SIEMPRE debe ser >= 1 (ARCA rechaza cant_alic=0)
-            # Si no hay IVA pero hay importe exento → generar alícuota con código 0003 (exento)
-            # y marcar cod_op = 'E' (operación exenta)
+            # Alícuotas
+            alics = _alics(row)
+
+            # ARCA exige cant_alic >= 1 en ventas
+            # Si no hay IVA pero hay exentas/no gravadas → alícuota 0003 (0%)
             if not alics:
-                _exentas_v = to_decimal(row.get('Imp. Op. Exentas', 0))
-                _total_v   = to_decimal(row.get('Imp. Total', 0))
-                _importe_exento = _exentas_v if _exentas_v != 0 else _total_v
-                if _importe_exento != 0:
-                    alics  = [('0', _importe_exento, Decimal('0'))]
-                    cod_op = 'E'   # Código de operación exenta según tabla ARCA
-                else:
-                    alics  = []
+                exentas_v = to_decimal(row.get('Imp. Op. Exentas', 0))
+                no_grav_v = to_decimal(row.get('Imp. Neto No Gravado', 0))
+                if exentas_v != 0:
+                    alics = [('0', exentas_v, Decimal('0'))]
+                elif no_grav_v != 0:
+                    alics = [('0', no_grav_v, Decimal('0'))]
+
             cant_alic = str(len(alics)) if alics else '1'
 
-            # ── VENTAS CBTE: 266 chars ───────────────────────────────────
-            # C1  fecha(8)  C2  tipo(3)   C3  pto(5)      C4  nro_desde(20)
-            # C5  nro_hasta(20)           C6  cod_doc(2)  C7  nro_id(20)
-            # C8  nombre(30)
-            # C9  total(15)  C10 no_gravado(15)  C11 perc_no_cat(15)
-            # C12 exentas(15) C13 perc_nac(15) C14 perc_iibb(15)
-            # C15 perc_mun(15) C16 imp_int(15)
-            # C17 moneda(3)  C18 tc(10)  C19 cant_alic(1)  C20 cod_op(1)
-            # C21 otros_trib(15)  C22 fecha_vto(8)
+            # CBTE: 266 chars exactos
             linea = (
                 fecha + tipo_cbte_txt(tipo) + pto_vta + nro_desde + nro_hasta +
                 cod_doc + nro_id + nombre +
@@ -228,8 +251,7 @@ def generar_ventas(rows):
             assert len(linea) == 266, f"CBTE len={len(linea)}"
             cbte_lines.append(linea)
 
-            # ── VENTAS ALICUOTAS: 62 chars ───────────────────────────────
-            # tipo(3) pto(5) nro_desde(20) neto_gravado(15) cod_alic(4) imp_liq(15)
+            # ALÍCUOTAS: 62 chars exactos
             for alic, neto_v, iva_v in alics:
                 la = (
                     tipo_cbte_txt(tipo) + pto_vta + nro_desde +
@@ -239,17 +261,13 @@ def generar_ventas(rows):
                 alic_lines.append(la)
 
         except Exception as e:
-            errores.append(f"Ventas fila {i+1}: {e}")
+            errores.append(f'Ventas fila {i+1}: {e}')
 
     return cbte_lines, alic_lines, errores
 
 
 def generar_compras(rows):
-    """
-    COMPRAS_CBTE: 325 chars exactos por línea.
-    COMPRAS_ALICUOTAS: 84 chars exactos por línea.
-    Posiciones y cod_op confirmados con plantilla de referencia del cliente.
-    """
+    """COMPRAS_CBTE (325 chars) + COMPRAS_ALICUOTAS (84 chars)."""
     cbte_lines, alic_lines, errores = [], [], []
 
     for i, row in enumerate(rows):
@@ -258,7 +276,7 @@ def generar_compras(rows):
             tipo     = str(row.get('Tipo de Comprobante','')).strip().split('.')[0]
             pto_vta  = fmt_num(row.get('Punto de Venta', 0), 5)
             nro_cbte = fmt_num(row.get('Número Desde',   0), 20)
-            despacho = fmt_alfa('', 16)   # espacios para compras locales
+            despacho = fmt_alfa('', 16)
             cod_doc  = fmt_num(row.get('Tipo Doc. Vendedor',
                                row.get('Tipo Doc. Receptor', 80)), 2)
             nro_id   = nro_doc(row.get('Nro. Doc. Vendedor',
@@ -271,25 +289,16 @@ def generar_compras(rows):
             total      = fmt_importe(to_decimal(row.get('Imp. Total',           0)))
             no_gravado = fmt_importe(to_decimal(row.get('Imp. Neto No Gravado', 0)))
             exentas    = fmt_importe(to_decimal(row.get('Imp. Op. Exentas',     0)))
-            # cred_fisc = IVA de la factura (lo que se toma como crédito fiscal)
             cred_fisc  = fmt_importe(to_decimal(row.get('Total IVA',            0)))
             otros_trib = fmt_importe(to_decimal(row.get('Otros Tributos',       0)))
             cero15     = fmt_importe(0)
-            # cod_op = '0' para comprobantes normales (confirmado por plantilla referencia)
             cod_op     = cod_op_compras(tipo)
-            alics      = _alics(row)
-            cant_alic  = str(len(alics)) if alics else '1'
 
-            # ── COMPRAS CBTE: 325 chars ──────────────────────────────────
-            # C1  fecha(8)   C2  tipo(3)    C3  pto(5)     C4  nro(20)
-            # C5  despacho(16)              C6  cod_doc(2) C7  nro_id(20)
-            # C8  nombre(30)
-            # C9  total(15)  C10 no_gravado(15)  C11 exentas(15)
-            # C12 perc_iva(15) C13 perc_nac(15) C14 perc_iibb(15)
-            # C15 perc_mun(15) C16 imp_int(15)
-            # C17 moneda(3)  C18 tc(10)  C19 cant_alic(1)  C20 cod_op(1)
-            # C21 cred_fisc(15)  C22 otros_trib(15)
-            # C23 cuit_emisor(11)  C24 denom_emisor(30)  C25 iva_comision(15)
+            alics = _alics(row)
+            # En compras cant_alic=0 está permitido (facturas exentas)
+            cant_alic = str(len(alics)) if alics else '0'
+
+            # CBTE: 325 chars exactos
             linea = (
                 fecha + tipo_cbte_txt(tipo) + pto_vta + nro_cbte + despacho +
                 cod_doc + nro_id + nombre +
@@ -302,8 +311,7 @@ def generar_compras(rows):
             assert len(linea) == 325, f"CBTE len={len(linea)}"
             cbte_lines.append(linea)
 
-            # ── COMPRAS ALICUOTAS: 84 chars ──────────────────────────────
-            # tipo(3) pto(5) nro(20) cod_doc(2) nro_id(20) neto(15) alic(4) iva(15)
+            # ALÍCUOTAS: 84 chars exactos
             for alic, neto_v, iva_v in alics:
                 la = (
                     tipo_cbte_txt(tipo) + pto_vta + nro_cbte +
@@ -314,14 +322,13 @@ def generar_compras(rows):
                 alic_lines.append(la)
 
         except Exception as e:
-            errores.append(f"Compras fila {i+1}: {e}")
+            errores.append(f'Compras fila {i+1}: {e}')
 
     return cbte_lines, alic_lines, errores
 
 # ─── LECTORES ─────────────────────────────────────────────────────────────────
 
 def _xls_to_xlsx(uploaded_file):
-    """Convierte XLS a XLSX si es necesario y devuelve la ruta."""
     ext = os.path.splitext(uploaded_file.name)[1].lower()
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
         tmp.write(uploaded_file.getvalue())
@@ -335,10 +342,7 @@ def _xls_to_xlsx(uploaded_file):
 
 
 def leer_xls_ventas(uploaded_file):
-    """
-    Plantilla XLS/XLSX de VENTAS de Contabilium.
-    Hoja 'Comprobantes'. Nro. Documento / Cuit = CUIT del COMPRADOR.
-    """
+    """Plantilla XLS/XLSX de ventas (Contabilium). Hoja 'Comprobantes'."""
     tmp_path = _xls_to_xlsx(uploaded_file)
     df = pd.read_excel(tmp_path, sheet_name='Comprobantes', dtype=str).fillna('')
 
@@ -375,15 +379,9 @@ def leer_xls_ventas(uploaded_file):
 
 
 def leer_xls_compras(uploaded_file):
-    """
-    Plantilla XLS de COMPRAS ('Planilla Tango' u hoja con datos de proveedores).
-    Columnas: FECHA, TIPO COMPROBANTE, LETRA, SUCURSAL, COMPROBANTE,
-              NOMBRE PROVEEDOR, CUIT (del proveedor/vendedor),
-              NETO GRAV_21, 0.21 (IVA 21%), TOTAL FACTURADO.
-    """
+    """Plantilla XLS de compras (Planilla Tango). Columna CUIT = proveedor."""
     tmp_path = _xls_to_xlsx(uploaded_file)
 
-    # Intentar hoja 'Planilla Tango' primero, luego 'Comprobantes'
     try:
         df = pd.read_excel(tmp_path, sheet_name='Planilla Tango', dtype=str).fillna('')
         fuente = 'Planilla Tango'
@@ -391,48 +389,34 @@ def leer_xls_compras(uploaded_file):
         df = pd.read_excel(tmp_path, sheet_name=0, dtype=str).fillna('')
         fuente = 'hoja 1'
 
-    # Mapeo de tipos de comprobante texto → código AFIP
     TIPOS_MAP = {
-        'FACTURA A': '1', 'FACTURA B': '6', 'FACTURA C': '11',
-        'NOTA DEBITO A': '2', 'NOTA DEBITO B': '7', 'NOTA DEBITO C': '12',
-        'NOTA CREDITO A': '3', 'NOTA CREDITO B': '8', 'NOTA CREDITO C': '13',
-        'FACTURA': '1',  # default si solo dice FACTURA sin letra
+        'FACTURA A':'1','FACTURA B':'6','FACTURA C':'11',
+        'NOTA DEBITO A':'2','NOTA DEBITO B':'7','NOTA DEBITO C':'12',
+        'NOTA CREDITO A':'3','NOTA CREDITO B':'8','NOTA CREDITO C':'13',
+        'FACTURA':'1',
     }
 
     rows = []
     for _, r in df.iterrows():
-        # Tipo: combinar TIPO COMPROBANTE + LETRA
         tipo_txt = str(r.get('TIPO COMPROBANTE','')).strip().upper()
         letra    = str(r.get('LETRA','')).strip().upper()
         clave    = f'{tipo_txt} {letra}'.strip() if letra else tipo_txt
         tipo_afip = TIPOS_MAP.get(clave, TIPOS_MAP.get(tipo_txt, '1'))
 
-        # Punto de venta y número
         pto = str(r.get('SUCURSAL','1')).strip().split('.')[0]
         nro = str(r.get('COMPROBANTE','')).strip().split('.')[0]
 
-        # CUIT del PROVEEDOR (vendedor) — no del comprador
         cuit_raw = str(r.get('CUIT','')).strip()
         try:    cuit_raw = str(int(float(cuit_raw))) if cuit_raw else '0'
         except: cuit_raw = '0'
 
-        # IVA 21% — la columna se llama 0.21 en la Planilla Tango
-        iva21_cols  = [0.21, '0.21', 'IVA 21%', 'IVA_21', 'IVA 21']
-        neto21_cols = ['NETO GRAV_21', 'BASE GRAVADA', 'Neto Gravado 21']
-        iva21  = '0'
-        neto21 = '0'
-        for c in iva21_cols:
-            if c in r.index and str(r[c]).strip() not in ('','nan'):
-                iva21 = str(r[c]).strip(); break
-        for c in neto21_cols:
-            if c in r.index and str(r[c]).strip() not in ('','nan'):
-                neto21 = str(r[c]).strip(); break
+        iva21_cols  = [0.21,'0.21','IVA 21%','IVA_21','IVA 21']
+        neto21_cols = ['NETO GRAV_21','BASE GRAVADA','Neto Gravado 21']
+        total_cols  = ['TOTAL FACTURADO','Total','TOTAL']
 
-        total_cols = ['TOTAL FACTURADO', 'Total', 'TOTAL']
-        total = '0'
-        for c in total_cols:
-            if c in r.index and str(r[c]).strip() not in ('','nan'):
-                total = str(r[c]).strip(); break
+        iva21  = next((str(r[c]).strip() for c in iva21_cols  if c in r.index and str(r[c]).strip() not in ('','nan')), '0')
+        neto21 = next((str(r[c]).strip() for c in neto21_cols if c in r.index and str(r[c]).strip() not in ('','nan')), '0')
+        total  = next((str(r[c]).strip() for c in total_cols  if c in r.index and str(r[c]).strip() not in ('','nan')), '0')
 
         rows.append({
             'Fecha':                     str(r.get('FECHA','')).strip()[:10],
@@ -458,85 +442,80 @@ def leer_xls_compras(uploaded_file):
 
 def leer_csv_afip(uploaded_file):
     """
-    Lee CSV de comprobantes del portal AFIP. Maneja 3 variantes:
-    A) Fila 0: CUIT + headers en misma fila (col 0 = CUIT numérico de 11 dígitos)
-       → fecha en col 0 de cada fila de datos
-    B) Fila 0: solo CUIT, fila 1: headers reales
-    C) Fila 0: headers directamente (sin fila de CUIT)
-       → fecha en columna 'Fecha de Emisión' o 'Fecha'
+    CSV de AFIP. Maneja 3 variantes:
+    A) Col 0 = CUIT + headers en misma fila
+    B) Col 0 = solo CUIT, headers en fila siguiente
+    C) Headers directamente (sin fila de CUIT) — formato nuevo AFIP
     """
     raw = uploaded_file.read().decode('utf-8-sig')
     sep = ';' if raw.count(';') > raw.count(',') else ','
     all_lines = [l for l in raw.splitlines() if l.strip()]
 
-    # Quitar comillas de los headers
     def clean(s): return s.strip().strip('"').strip()
 
     first_cols = [clean(c) for c in all_lines[0].split(sep)]
     col0 = first_cols[0]
 
-    # Variante A: col0 es CUIT numérico de 11 dígitos Y col1 parece header de texto
-    if col0.isdigit() and len(col0) == 11 and len(first_cols) > 1 and not first_cols[1].replace(',','').replace('.','').isdigit():
-        reader = csv.DictReader(all_lines, delimiter=sep)
-        rows = []
-        for row in reader:
-            fecha_key = list(row.keys())[0]
-            row['Fecha'] = clean(row[fecha_key])
-            rows.append({clean(k): clean(v) for k, v in row.items()})
-        return rows
+    FECHA_COLS = ['Fecha de Emisión','Fecha de emision','Fecha','FECHA','fecha']
 
-    # Variante B: col0 es solo CUIT, fila 1 tiene headers reales
-    if col0.isdigit() and len(col0) == 11 and len(first_cols) == 1:
-        reader = csv.DictReader(all_lines[1:], delimiter=sep)
-        rows = []
-        for row in reader:
-            if not any(v.strip() for v in row.values()): continue
-            rows.append({clean(k): clean(v) for k, v in row.items()})
-        return rows
-
-    # Variante C: arranca directo con headers (sin fila de CUIT)
-    # Puede ser CSV de emitidos (ventas) o recibidos (compras)
-    reader = csv.DictReader(all_lines, delimiter=sep)
-    rows = []
-    FECHA_COLS = ['Fecha de Emisión', 'Fecha de emision', 'Fecha', 'FECHA', 'fecha']
-    for row in reader:
-        if not any(v.strip() for v in row.values()): continue
+    def normalizar(row):
         r = {clean(k): clean(v) for k, v in row.items()}
-        # Normalizar columna de fecha
         if 'Fecha' not in r:
             for fc in FECHA_COLS:
                 if fc in r and r[fc]:
-                    r['Fecha'] = r[fc]
-                    break
-        # CSV de COMPRAS RECIBIDOS: el proveedor es el Emisor
-        # Mapear a los nombres que usa generar_compras
+                    r['Fecha'] = r[fc]; break
+        # CSV recibidos: Emisor = proveedor/vendedor
         if 'Nro. Doc. Emisor' in r:
-            r['Tipo Doc. Vendedor']     = r.get('Tipo Doc. Emisor', '80')
-            r['Nro. Doc. Vendedor']     = r.get('Nro. Doc. Emisor', '0')
-            r['Denominación Vendedor']  = r.get('Denominación Emisor', '')
-        rows.append(r)
-    return rows
+            r['Tipo Doc. Vendedor']    = r.get('Tipo Doc. Emisor', '80')
+            r['Nro. Doc. Vendedor']    = r.get('Nro. Doc. Emisor', '0')
+            r['Denominación Vendedor'] = r.get('Denominación Emisor', '')
+        return r
+
+    # Variante A: col0 es CUIT + headers
+    if col0.isdigit() and len(col0)==11 and len(first_cols)>1 and not first_cols[1].replace(',','').replace('.','').isdigit():
+        reader = csv.DictReader(all_lines, delimiter=sep)
+        rows = []
+        for row in reader:
+            r = normalizar(row)
+            fecha_key = list(row.keys())[0]
+            if 'Fecha' not in r: r['Fecha'] = clean(row[fecha_key])
+            rows.append(r)
+        return rows
+
+    # Variante B: col0 = solo CUIT
+    if col0.isdigit() and len(col0)==11 and len(first_cols)==1:
+        reader = csv.DictReader(all_lines[1:], delimiter=sep)
+        return [normalizar(row) for row in reader if any(v.strip() for v in row.values())]
+
+    # Variante C: headers directamente
+    reader = csv.DictReader(all_lines, delimiter=sep)
+    return [normalizar(row) for row in reader if any(v.strip() for v in row.values())]
 
 
 def leer_archivo_ventas(uploaded_file):
-    """Auto-detecta formato para VENTAS."""
     ext = os.path.splitext(uploaded_file.name)[1].lower()
-    if ext in ('.xls', '.xlsx'):
+    if ext in ('.xls','.xlsx'):
         return leer_xls_ventas(uploaded_file), 'Excel Ventas (Contabilium)'
     return leer_csv_afip(uploaded_file), 'CSV AFIP Ventas'
 
 
 def leer_archivo_compras(uploaded_file):
-    """Auto-detecta formato para COMPRAS."""
     ext = os.path.splitext(uploaded_file.name)[1].lower()
-    if ext in ('.xls', '.xlsx'):
+    if ext in ('.xls','.xlsx'):
         rows, fuente = leer_xls_compras(uploaded_file)
         return rows, f'Excel Compras ({fuente})'
     return leer_csv_afip(uploaded_file), 'CSV AFIP Compras'
 
 
 def lineas_a_bytes(lines):
-    return ('\r\n'.join(lines) + '\r\n').encode('utf-8')
+    """
+    Convierte lista de líneas a bytes.
+    ARCA exige ASCII/ISO-8859-1 — NO acepta UTF-8.
+    Transliteramos caracteres no-ASCII (ñ→n, tildes→sin tilde).
+    """
+    lines_ascii = [transliterar(l) for l in lines]
+    return ('\r\n'.join(lines_ascii) + '\r\n').encode('latin-1', errors='replace')
+
 
 def hacer_zip(archivos):
     buf = io.BytesIO()
@@ -561,8 +540,8 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("""
 **Formatos aceptados:**
+- CSV del portal AFIP (emitidos/recibidos)
 - Plantilla XLS/XLSX (Contabilium)
-- CSV del portal AFIP
 """)
     st.markdown("---")
     st.caption(f"Estudio Contable MIRRA · {datetime.now().year}")
@@ -590,14 +569,14 @@ st.markdown("""
 col1, col2 = st.columns(2)
 with col1:
     st.markdown("#### 📤 Ventas")
-    st.caption("XLS/XLSX de Contabilium **o** CSV del portal AFIP")
+    st.caption("CSV de **comprobantes emitidos** del portal AFIP")
     file_v = st.file_uploader(
         "ventas", type=['csv','xls','xlsx'],
         key='ventas', label_visibility='collapsed'
     )
 with col2:
     st.markdown("#### 📥 Compras *(opcional)*")
-    st.caption("CSV del portal AFIP de comprobantes recibidos")
+    st.caption("CSV de **comprobantes recibidos** del portal AFIP")
     file_c = st.file_uploader(
         "compras", type=['csv','xls','xlsx'],
         key='compras', label_visibility='collapsed'
@@ -606,7 +585,7 @@ with col2:
 with st.expander("⚙️ Configuración avanzada"):
     periodo_manual = st.text_input(
         "Forzar período (YYYYMM)",
-        placeholder="Ej: 202601 — se detecta automáticamente si lo dejás vacío",
+        placeholder="Ej: 202603 — se detecta automáticamente si lo dejás vacío",
         max_chars=6,
     )
 
@@ -615,7 +594,7 @@ st.divider()
 # ─── BOTÓN PROCESAR ──────────────────────────────────────────────────────────
 
 if not file_v:
-    st.info("👆 Cargá el archivo de ventas para comenzar.")
+    st.info("👆 Cargá el CSV de comprobantes emitidos (ventas) para comenzar.")
 
 if st.button("🚀 GENERAR ARCHIVOS TXT", disabled=(file_v is None)):
     archivos_out, todos_errores = {}, []
