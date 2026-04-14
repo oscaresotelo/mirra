@@ -263,6 +263,27 @@ def generar_ventas(rows):
         except Exception as e:
             errores.append(f'Ventas fila {i+1}: {e}')
 
+    # Ordenar por fecha → tipo → pto_vta → nro (igual que el TXT de referencia)
+    orden = sorted(range(len(cbte_lines)), key=lambda i: (
+        cbte_lines[i][0:8],   # fecha
+        cbte_lines[i][11:16], # pto_vta
+        cbte_lines[i][8:11],  # tipo
+        cbte_lines[i][16:36], # nro
+    ))
+    cbte_lines = [cbte_lines[i] for i in orden]
+
+    # Ordenar alícuotas con el mismo orden que los CBTE
+    alic_by_cbte = {}
+    for la in alic_lines:
+        key = (la[0:3], la[3:8], la[8:28])
+        alic_by_cbte.setdefault(key, []).append(la)
+
+    alic_lines = []
+    for linea in cbte_lines:
+        key = (linea[8:11], linea[11:16], linea[16:36])
+        for la in alic_by_cbte.get(key, []):
+            alic_lines.append(la)
+
     return cbte_lines, alic_lines, errores
 
 
@@ -324,7 +345,28 @@ def generar_compras(rows):
         except Exception as e:
             errores.append(f'Compras fila {i+1}: {e}')
 
+    # Ordenar por fecha → tipo → pto_vta → nro
+    orden = sorted(range(len(cbte_lines)), key=lambda i: (
+        cbte_lines[i][0:8],
+        cbte_lines[i][8:11],
+        cbte_lines[i][11:16],
+        cbte_lines[i][16:36],
+    ))
+    cbte_lines = [cbte_lines[i] for i in orden]
+
+    alic_by_cbte = {}
+    for la in alic_lines:
+        key = (la[0:3], la[3:8], la[8:28])
+        alic_by_cbte.setdefault(key, []).append(la)
+
+    alic_lines = []
+    for linea in cbte_lines:
+        key = (linea[8:11], linea[11:16], linea[16:36])
+        for la in alic_by_cbte.get(key, []):
+            alic_lines.append(la)
+
     return cbte_lines, alic_lines, errores
+
 
 # ─── LECTORES ─────────────────────────────────────────────────────────────────
 
