@@ -547,7 +547,7 @@ def leer_csv_afip(uploaded_file):
     return [normalizar(row) for row in reader if any(v.strip() for v in row.values())]
 
 
-def leer_archivo_ventas(uploaded_file):
+def leer_archivo_ventas(uploaded_file, tango_file=None):
     ext = os.path.splitext(uploaded_file.name)[1].lower()
     if ext in ('.xls','.xlsx'):
         return leer_xls_ventas(uploaded_file), 'Excel Ventas (Contabilium)'
