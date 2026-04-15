@@ -383,19 +383,6 @@ def _xls_to_xlsx(uploaded_file):
     return tmp_path
 
 
-def _build_tango_index(df):
-    """Construye índice (pto, nro) → row del Excel de Tango para cruce de CUITs."""
-    idx = {}
-    for _, r in df.iterrows():
-        numero = str(r.get('Número','')).strip()
-        if '-' in numero:
-            pto_raw, nro_raw = numero.split('-',1)
-            pto = pto_raw.lstrip('0') or '0'
-            nro = nro_raw.lstrip('0') or '0'
-            idx[(pto, nro)] = r
-    return idx
-
-
 def leer_xls_ventas(uploaded_file):
     """Plantilla XLS/XLSX de ventas (Contabilium). Hoja 'Comprobantes'."""
     tmp_path = _xls_to_xlsx(uploaded_file)
@@ -547,7 +534,7 @@ def leer_csv_afip(uploaded_file):
     return [normalizar(row) for row in reader if any(v.strip() for v in row.values())]
 
 
-def leer_archivo_ventas(uploaded_file, tango_file=None):
+def leer_archivo_ventas(uploaded_file):
     ext = os.path.splitext(uploaded_file.name)[1].lower()
     if ext in ('.xls','.xlsx'):
         return leer_xls_ventas(uploaded_file), 'Excel Ventas (Contabilium)'
@@ -637,13 +624,6 @@ with col2:
         key='compras', label_visibility='collapsed'
     )
 
-st.markdown("#### 📋 Plantilla Tango *(opcional, para completar CUITs)*")
-st.caption("Excel exportado de Tango — se usa para corregir CUITs inválidos en el CSV de ventas")
-file_tango = st.file_uploader(
-    "tango", type=['xls','xlsx'],
-    key='tango', label_visibility='collapsed'
-)
-
 with st.expander("⚙️ Configuración avanzada"):
     periodo_manual = st.text_input(
         "Forzar período (YYYYMM)",
@@ -663,7 +643,7 @@ if st.button("🚀 GENERAR ARCHIVOS TXT", disabled=(file_v is None)):
 
     with st.spinner("Procesando..."):
         try:
-            rows_v, fmt_v = leer_archivo_ventas(file_v, tango_file=file_tango if 'file_tango' in dir() else None)
+            rows_v, fmt_v = leer_archivo_ventas(file_v)
             periodo = periodo_manual.strip() if periodo_manual.strip() else detectar_periodo(rows_v)
 
             cbte_v, alic_v, err_v = generar_ventas(rows_v)
