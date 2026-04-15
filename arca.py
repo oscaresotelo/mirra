@@ -208,10 +208,12 @@ def generar_ventas(rows):
                 nro_id  = '0' * 20
                 nombre  = fmt_alfa('VENTAS DEL DIA', 30)
             elif cod_doc == '80' and not verificar_cuit(_nro_raw):
-                # CUIT con dígito verificador inválido
-                nro_id = '0' * 20
-                nombre = fmt_alfa(_nom_raw, 30)
-                errores.append(f'Fila {i+1}: CUIT {_nro_raw} inválido ({_nom_raw}) — se puso ceros')
+                # CUIT con dígito verificador inválido → tratar como consumidor final
+                # Regla del estudio: cod_doc=99, nro=ceros, nombre=VENTAS DEL DIA
+                cod_doc = '99'
+                nro_id  = '0' * 20
+                nombre  = fmt_alfa('VENTAS DEL DIA', 30)
+                errores.append(f'Advertencia fila {i+1}: CUIT {_nro_raw} inválido — se registró como consumidor final (cod 99)')
             else:
                 nro_id = nro_doc(_nro_raw)
                 nombre = fmt_alfa(_nom_raw if _nom_raw else 'VENTAS DEL DIA', 30)
