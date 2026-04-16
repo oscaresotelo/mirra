@@ -208,12 +208,10 @@ def generar_ventas(rows):
                 nro_id  = '0' * 20
                 nombre  = fmt_alfa('VENTAS DEL DIA', 30)
             elif cod_doc == '80' and not verificar_cuit(_nro_raw):
-                # CUIT con dígito verificador inválido → tratar como consumidor final
-                # Regla del estudio: cod_doc=99, nro=ceros, nombre=VENTAS DEL DIA
-                cod_doc = '99'
-                nro_id  = '0' * 20
-                nombre  = fmt_alfa('VENTAS DEL DIA', 30)
-                errores.append(f'Advertencia fila {i+1}: CUIT {_nro_raw} inválido — se registró como consumidor final (cod 99)')
+                # CUIT con dígito verificador inválido
+                nro_id = '0' * 20
+                nombre = fmt_alfa(_nom_raw, 30)
+                errores.append(f'Fila {i+1}: CUIT {_nro_raw} inválido ({_nom_raw}) — se puso ceros')
             else:
                 nro_id = nro_doc(_nro_raw)
                 nombre = fmt_alfa(_nom_raw if _nom_raw else 'VENTAS DEL DIA', 30)
@@ -723,3 +721,211 @@ if 'resultado' in st.session_state:
                 mime="text/plain",
                 key=f"dl_{nombre}",
             )
+
+
+# ─── SECCIÓN: CONVERTIR CSV → PLANTILLA TANGO ────────────────────────────────
+
+st.divider()
+st.markdown("""
+<div style="background:linear-gradient(135deg,#1565C0 0%,#1976D2 100%);
+            padding:1.25rem 2rem;border-radius:12px;margin-bottom:1.5rem;">
+    <h2 style="color:white;margin:0;font-size:1.3rem;font-weight:600;">
+        📋 Convertir CSV ARCA → Plantilla Tango
+    </h2>
+    <p style="color:#BBDEFB;margin:0.3rem 0 0;font-size:0.85rem;">
+        Genera el Excel de importación para Tango a partir del CSV descargado de ARCA
+    </p>
+</div>
+""", unsafe_allow_html=True)
+
+file_csv_tango = st.file_uploader(
+    "CSV de comprobantes emitidos (ARCA)",
+    type=['csv'],
+    key='csv_tango',
+    help="Archivo CSV descargado del portal ARCA/AFIP — Comprobantes Emitidos"
+)
+
+if st.button("📋 GENERAR PLANTILLA TANGO", disabled=(file_csv_tango is None), key='btn_tango'):
+    with st.spinner("Generando plantilla..."):
+        try:
+            xlsx_bytes = csv_a_plantilla_tango(file_csv_tango.getvalue())
+            # Detectar período del CSV
+            raw_csv = file_csv_tango.getvalue().decode('utf-8-sig')
+            first_line = [l for l in raw_csv.splitlines() if l.strip()][1]
+            fecha_str = first_line.split(';')[0].strip().strip('"')
+            periodo_tango = parse_fecha(fecha_str)
+            periodo_str = periodo_tango.strftime('%Y%m') if periodo_tango else 'YYYYMM'
+
+            st.success(f"✅ Plantilla generada — {len(xlsx_bytes):,} bytes")
+            st.download_button(
+                label=f"⬇ PlantillaVentas_TANGO_{periodo_str}.xlsx",
+                data=xlsx_bytes,
+                file_name=f"PlantillaVentas_TANGO_{periodo_str}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key='dl_tango',
+            )
+        except Exception as e:
+            st.error(f"❌ Error: {e}")
+elif file_csv_tango is None:
+    st.info("👆 Subí el CSV de comprobantes emitidos para generar la Plantilla Tango.")
+
+
+# ─── GENERADOR PLANTILLA TANGO ───────────────────────────────────────────────
+
+_TIPO_TANGO = {
+    '1':('A','FCV','001'), '2':('A','NDA','002'), '3':('A','NCA','003'),
+    '4':('A','RCA','004'), '6':('B','FCV','006'), '7':('B','NDB','007'),
+    '8':('B','NCB','008'), '9':('B','RCB','009'), '11':('C','FCV','011'),
+    '12':('C','NDC','012'), '13':('C','NCC','013'),
+}
+
+_TANGO_HEADERS = [
+    'Letra','Número','Tipo de comprobante','Fecha','Fecha contable',
+    'Razón social','Tipo documento','Nro. Documento / Cuit','Condición de IVA',
+    'Nro. IIBB','Provincia','Sujeto vinculado','Operación habitual','Calle',
+    'Localidad','Piso','Departamento','Código postal','Operación sujeto vinculado',
+    'Tipo comprobante AFIP','Operación AFIP','Comprobante electrónico','CAE / CAI',
+    'Fecha vencimiento CAE / CAI','Cotización','Neto Gravado 21','IVA 21','Total',
+]
+
+_TANGO_COL_WIDTHS = {
+    'A':5.42,'B':8.29,'C':20.0,'D':6.14,'E':14.29,'F':11.71,'G':15.42,
+    'H':21.0,'I':16.29,'J':8.71,'K':9.14,'L':15.71,'M':18.0,'N':5.42,
+    'O':9.29,'P':4.71,'Q':13.86,'R':13.0,'S':25.42,'T':21.85,'U':14.57,
+    'V':23.86,'W':9.14,'X':26.71,'Y':10.14,'Z':11.43,'AA':11.43,'AB':11.43,
+}
+
+
+def _conv_cae(s):
+    s = str(s).strip().replace(',', '.')
+    try:    return int(float(s))
+    except: return s if s else None
+
+
+def csv_a_plantilla_tango(csv_bytes: bytes) -> bytes:
+    """Convierte CSV de comprobantes emitidos (ARCA) → Plantilla Ventas Tango XLSX."""
+    import openpyxl
+    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.utils import get_column_letter
+
+    HEADER_FILL = PatternFill('solid', fgColor='B8CCE4')
+    HFONT  = Font(name='Calibri', size=11)
+    DFONT  = Font(name='Calibri', size=11)
+    A_L    = Alignment(horizontal='left',  vertical='bottom')
+    A_R    = Alignment(horizontal='right', vertical='bottom')
+    TEXT_C  = {1,2,3,6,7,8,9,10,11,20}
+    RIGHT_C = {25,26,27,28}
+    DATE_C  = {4,5}
+
+    raw   = csv_bytes.decode('utf-8-sig')
+    lines = [l for l in raw.splitlines() if l.strip()]
+    sep   = ';' if raw.count(';') > raw.count(',') else ','
+
+    def cl(s): return s.strip().strip('"').strip()
+    rows_csv = [{cl(k): cl(v) for k,v in r.items()}
+                for r in csv.DictReader(lines, delimiter=sep)]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Comprobantes'
+    ws.row_dimensions[1].height = 15.0
+
+    for ci, h in enumerate(_TANGO_HEADERS, 1):
+        c = ws.cell(row=1, column=ci, value=h)
+        c.fill = HEADER_FILL; c.font = HFONT
+        c.alignment = A_R if ci in RIGHT_C else A_L
+        if ci in TEXT_C: c.number_format = '@'
+
+    for ci in range(1, len(_TANGO_HEADERS)+1):
+        w = _TANGO_COL_WIDTHS.get(get_column_letter(ci))
+        if w: ws.column_dimensions[get_column_letter(ci)].width = w
+
+    for ri, r in enumerate(rows_csv, 2):
+        tipo_raw = r.get('Tipo de Comprobante','').strip()
+        lc, td, c3 = _TIPO_TANGO.get(tipo_raw, ('?','FCV',tipo_raw.zfill(3)))
+
+        pto = r.get('Punto de Venta','').strip().zfill(5)
+        nro = r.get('Número Desde','').strip().zfill(8)
+        fecha = parse_fecha(r.get('Fecha de Emisión',''))
+
+        cod_doc = r.get('Tipo Doc. Receptor','').strip()
+        nro_doc = r.get('Nro. Doc. Receptor','').strip()
+        nombre  = r.get('Denominación Receptor','').strip()
+        try:    cuit_n = int(nro_doc) if nro_doc and nro_doc!='0' else None
+        except: cuit_n = None
+
+        cond_iva = 'RI' if cod_doc=='80' else 'CF'
+        cae      = _conv_cae(r.get('Cód. Autorización',''))
+        cotiz    = float(to_decimal(r.get('Tipo Cambio','1').replace(',','.')) or Decimal('1'))
+        neto21   = float(to_decimal(r.get('Imp. Neto Gravado IVA 21%','0')))
+        iva21    = float(to_decimal(r.get('IVA 21%','0')))
+        total    = float(to_decimal(r.get('Imp. Total','0')))
+
+        vals = [lc, f'{pto}-{nro}', td, fecha, fecha,
+                nombre, cod_doc, cuit_n, cond_iva,
+                None,'14',None,None,None,None,None,None,None,None,
+                c3,'0',None,cae,None,
+                cotiz, neto21, iva21, total]
+
+        for ci, val in enumerate(vals, 1):
+            c = ws.cell(row=ri, column=ci, value=val)
+            c.font = DFONT
+            if ci in DATE_C and isinstance(val, datetime):
+                c.number_format='m/d/yyyy'; c.alignment=A_L
+            elif ci in RIGHT_C: c.alignment=A_R
+            elif ci in TEXT_C:  c.number_format='@'; c.alignment=A_L
+            else:               c.alignment=A_L
+
+    wc = wb.create_sheet('Configuracion')
+    for ci,v in enumerate(['PLANTILLA','COD_MODELO_INGRESO','ID_MODELO_INGRESO','1','2','98'],1):
+        wc.cell(row=1,column=ci,value=v)
+    for ci,v in enumerate(['Ventas','VENTAS',5,0,1,2],1):
+        wc.cell(row=2,column=ci,value=v)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# ─── SECCIÓN: CONVERTIR CSV → PLANTILLA TANGO ────────────────────────────────
+
+st.divider()
+st.markdown("""
+<div style="background:linear-gradient(135deg,#1565C0 0%,#1976D2 100%);
+            padding:1.25rem 2rem;border-radius:12px;margin-bottom:1.5rem;">
+    <h2 style="color:white;margin:0;font-size:1.3rem;font-weight:600;">
+        📋 Convertir CSV ARCA → Plantilla Tango
+    </h2>
+    <p style="color:#BBDEFB;margin:0.3rem 0 0;font-size:0.85rem;">
+        Genera el Excel de importación para Tango a partir del CSV descargado de ARCA
+    </p>
+</div>
+""", unsafe_allow_html=True)
+
+file_csv_tango = st.file_uploader(
+    "CSV de comprobantes emitidos (ARCA)",
+    type=['csv'],
+    key='csv_tango',
+    help="Archivo CSV descargado del portal ARCA — Comprobantes Emitidos"
+)
+
+if st.button("📋 GENERAR PLANTILLA TANGO", disabled=(file_csv_tango is None), key='btn_tango'):
+    with st.spinner("Generando plantilla..."):
+        try:
+            xlsx_bytes = csv_a_plantilla_tango(file_csv_tango.getvalue())
+            raw_csv = file_csv_tango.getvalue().decode('utf-8-sig')
+            primera_fecha = [l for l in raw_csv.splitlines() if l.strip()][1].split(';')[0].strip().strip('"')
+            fd = parse_fecha(primera_fecha)
+            periodo_str = fd.strftime('%Y%m') if fd else 'YYYYMM'
+            st.success(f"✅ Plantilla generada — {len(xlsx_bytes):,} bytes")
+            st.download_button(
+                label=f"⬇ PlantillaVentas_TANGO_{periodo_str}.xlsx",
+                data=xlsx_bytes,
+                file_name=f"PlantillaVentas_TANGO_{periodo_str}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key='dl_tango',
+            )
+        except Exception as e:
+            st.error(f"❌ Error: {e}")
+elif file_csv_tango is None:
+    st.info("👆 Subí el CSV de comprobantes emitidos (ARCA) para generar la Plantilla Tango.")
