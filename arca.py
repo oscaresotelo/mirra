@@ -795,12 +795,10 @@ _TANGO_COL_WIDTHS = {
     'V':23.86,'W':9.14,'X':26.71,'Y':10.14,'Z':11.43,'AA':11.43,'AB':11.43,
 }
 
-
 def _conv_cae(s):
     s = str(s).strip().replace(',', '.')
     try:    return int(float(s))
     except: return s if s else None
-
 
 def csv_a_plantilla_tango(csv_bytes: bytes) -> bytes:
     """Convierte CSV de comprobantes emitidos (ARCA) → Plantilla Ventas Tango XLSX."""
@@ -846,7 +844,7 @@ def csv_a_plantilla_tango(csv_bytes: bytes) -> bytes:
 
         pto = r.get('Punto de Venta','').strip().zfill(5)
         nro = r.get('Número Desde','').strip().zfill(8)
-        fecha = parse_fecha(r.get('Fecha de Emisión',''))
+        fecha_afip = parse_fecha(r.get('Fecha de Emisión', r.get('Fecha', '')))
 
         cod_doc = r.get('Tipo Doc. Receptor','').strip()
         nro_doc = r.get('Nro. Doc. Receptor','').strip()
@@ -861,7 +859,7 @@ def csv_a_plantilla_tango(csv_bytes: bytes) -> bytes:
         iva21    = float(to_decimal(r.get('IVA 21%','0')))
         total    = float(to_decimal(r.get('Imp. Total','0')))
 
-        vals = [lc, f'{pto}-{nro}', td, fecha, fecha,
+        vals = [lc, f'{pto}-{nro}', td, fecha_afip, fecha_afip,
                 nombre, cod_doc, cuit_n, cond_iva,
                 None,'14',None,None,None,None,None,None,None,None,
                 c3,'0',None,cae,None,
@@ -870,24 +868,22 @@ def csv_a_plantilla_tango(csv_bytes: bytes) -> bytes:
         for ci, val in enumerate(vals, 1):
             c = ws.cell(row=ri, column=ci, value=val)
             c.font = DFONT
-            if ci in DATE_C and isinstance(val, datetime):
-                c.number_format='m/d/yyyy'; c.alignment=A_L
+            if ci in DATE_C: c.alignment=A_L
             elif ci in RIGHT_C: c.alignment=A_R
             elif ci in TEXT_C:  c.number_format='@'; c.alignment=A_L
             else:               c.alignment=A_L
 
     wc = wb.create_sheet('Configuracion')
-    for ci,v in enumerate(['PLANTILLA','COD_MODELO_INGRESO','ID_MODELO_INGRESO','1','2','98'],1):
-        wc.cell(row=1,column=ci,value=v)
-    for ci,v in enumerate(['Ventas','VENTAS',5,0,1,2],1):
-        wc.cell(row=2,column=ci,value=v)
+    conf_h = ['PLANTILLA','COD_MODELO_INGRESO','ID_MODELO_INGRESO','1','2','98']
+    conf_v = ['Ventas','VENTAS',5,0,1,2]
+    for ci,v in enumerate(conf_h,1): wc.cell(row=1,column=ci,value=v)
+    for ci,v in enumerate(conf_v,1): wc.cell(row=2,column=ci,value=v)
 
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
-
-# ─── SECCIÓN: CONVERTIR CSV → PLANTILLA TANGO ────────────────────────────────
+# ─── INTERFAZ: CONVERTIR CSV → PLANTILLA TANGO ───────────────────────────────
 
 st.divider()
 st.markdown("""
@@ -912,20 +908,30 @@ file_csv_tango = st.file_uploader(
 if st.button("📋 GENERAR PLANTILLA TANGO", disabled=(file_csv_tango is None), key='btn_tango'):
     with st.spinner("Generando plantilla..."):
         try:
-            xlsx_bytes = csv_a_plantilla_tango(file_csv_tango.getvalue())
-            raw_csv = file_csv_tango.getvalue().decode('utf-8-sig')
-            primera_fecha = [l for l in raw_csv.splitlines() if l.strip()][1].split(';')[0].strip().strip('"')
-            fd = parse_fecha(primera_fecha)
-            periodo_str = fd.strftime('%Y%m') if fd else 'YYYYMM'
-            st.success(f"✅ Plantilla generada — {len(xlsx_bytes):,} bytes")
+            content = file_csv_tango.getvalue()
+            xlsx_bytes = csv_a_plantilla_tango(content)
+            
+            # Detección de período para el nombre del archivo
+            raw_csv = content.decode('utf-8-sig')
+            lineas = [l for l in raw_csv.splitlines() if l.strip()]
+            periodo_str = "YYYYMM"
+            if len(lineas) > 1:
+                # Intenta sacar la fecha de la primera fila de datos
+                sep = ';' if raw_csv.count(';') > raw_csv.count(',') else ','
+                primera_fecha = lineas[1].split(sep)[0].strip().strip('"')
+                fd = parse_fecha(primera_fecha)
+                if fd != '00000000':
+                    periodo_str = fd[:6]
+
+            st.success(f"✅ Plantilla generada correctamente.")
             st.download_button(
-                label=f"⬇ PlantillaVentas_TANGO_{periodo_str}.xlsx",
+                label=f"⬇ Descargar PlantillaVentas_TANGO_{periodo_str}.xlsx",
                 data=xlsx_bytes,
                 file_name=f"PlantillaVentas_TANGO_{periodo_str}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key='dl_tango',
             )
         except Exception as e:
-            st.error(f"❌ Error: {e}")
+            st.error(f"❌ Error al procesar: {e}")
 elif file_csv_tango is None:
     st.info("👆 Subí el CSV de comprobantes emitidos (ARCA) para generar la Plantilla Tango.")
