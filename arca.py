@@ -958,7 +958,7 @@ if st.button("📋 GENERAR PLANTILLA TANGO", disabled=(file_csv_tango is None), 
             first_line = [l for l in raw_csv.splitlines() if l.strip()][1]
             fecha_str = first_line.split(';')[0].strip().strip('"')
             periodo_tango = parse_fecha(fecha_str)
-            periodo_str = periodo_tango.strftime('%Y%m') if periodo_tango else 'YYYYMM'
+            periodo_str = periodo_tango[:6] if periodo_tango != '00000000' else 'YYYYMM'
 
             st.success(f"✅ Plantilla generada — {len(xlsx_bytes):,} bytes")
             st.download_button(
