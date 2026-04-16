@@ -722,6 +722,93 @@ if 'resultado' in st.session_state:
                 key=f"dl_{nombre}",
             )
 
+def csv_a_plantilla_tango(csv_bytes: bytes) -> bytes:
+    """Convierte CSV de comprobantes emitidos (ARCA) → Plantilla Ventas Tango XLSX."""
+    import openpyxl
+    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.utils import get_column_letter
+
+    HEADER_FILL = PatternFill('solid', fgColor='B8CCE4')
+    HFONT  = Font(name='Calibri', size=11)
+    DFONT  = Font(name='Calibri', size=11)
+    A_L    = Alignment(horizontal='left',  vertical='bottom')
+    A_R    = Alignment(horizontal='right', vertical='bottom')
+    TEXT_C  = {1,2,3,6,7,8,9,10,11,20}
+    RIGHT_C = {25,26,27,28}
+    DATE_C  = {4,5}
+
+    raw   = csv_bytes.decode('utf-8-sig')
+    lines = [l for l in raw.splitlines() if l.strip()]
+    sep   = ';' if raw.count(';') > raw.count(',') else ','
+
+    def cl(s): return s.strip().strip('"').strip()
+    rows_csv = [{cl(k): cl(v) for k,v in r.items()}
+                for r in csv.DictReader(lines, delimiter=sep)]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Comprobantes'
+    ws.row_dimensions[1].height = 15.0
+
+    for ci, h in enumerate(_TANGO_HEADERS, 1):
+        c = ws.cell(row=1, column=ci, value=h)
+        c.fill = HEADER_FILL; c.font = HFONT
+        c.alignment = A_R if ci in RIGHT_C else A_L
+        if ci in TEXT_C: c.number_format = '@'
+
+    for ci in range(1, len(_TANGO_HEADERS)+1):
+        w = _TANGO_COL_WIDTHS.get(get_column_letter(ci))
+        if w: ws.column_dimensions[get_column_letter(ci)].width = w
+
+    for ri, r in enumerate(rows_csv, 2):
+        tipo_raw = r.get('Tipo de Comprobante','').strip()
+        lc, td, c3 = _TIPO_TANGO.get(tipo_raw, ('?','FCV',tipo_raw.zfill(3)))
+
+        pto = r.get('Punto de Venta','').strip().zfill(5)
+        nro = r.get('Número Desde','').strip().zfill(8)
+        fecha = parse_fecha(r.get('Fecha de Emisión',''))
+
+        cod_doc = r.get('Tipo Doc. Receptor','').strip()
+        nro_doc = r.get('Nro. Doc. Receptor','').strip()
+        nombre  = r.get('Denominación Receptor','').strip()
+        try:    cuit_n = int(nro_doc) if nro_doc and nro_doc!='0' else None
+        except: cuit_n = None
+
+        cond_iva = 'RI' if cod_doc=='80' else 'CF'
+        cae      = _conv_cae(r.get('Cód. Autorización',''))
+        cotiz    = float(to_decimal(r.get('Tipo Cambio','1').replace(',','.')) or Decimal('1'))
+        neto21   = float(to_decimal(r.get('Imp. Neto Gravado IVA 21%','0')))
+        iva21    = float(to_decimal(r.get('IVA 21%','0')))
+        total    = float(to_decimal(r.get('Imp. Total','0')))
+
+        vals = [lc, f'{pto}-{nro}', td, fecha, fecha,
+                nombre, cod_doc, cuit_n, cond_iva,
+                None,'14',None,None,None,None,None,None,None,None,
+                c3,'0',None,cae,None,
+                cotiz, neto21, iva21, total]
+
+        for ci, val in enumerate(vals, 1):
+            c = ws.cell(row=ri, column=ci, value=val)
+            c.font = DFONT
+            if ci in DATE_C and isinstance(val, datetime):
+                c.number_format='m/d/yyyy'; c.alignment=A_L
+            elif ci in RIGHT_C: c.alignment=A_R
+            elif ci in TEXT_C:  c.number_format='@'; c.alignment=A_L
+            else:               c.alignment=A_L
+
+    wc = wb.create_sheet('Configuracion')
+    for ci,v in enumerate(['PLANTILLA','COD_MODELO_INGRESO','ID_MODELO_INGRESO','1','2','98'],1):
+        wc.cell(row=1,column=ci,value=v)
+    for ci,v in enumerate(['Ventas','VENTAS',5,0,1,2],1):
+        wc.cell(row=2,column=ci,value=v)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# ─── SECCIÓN: CONVERTIR CSV → PLANTILLA TANGO ────────────────────────────────
+
 
 # ─── SECCIÓN: CONVERTIR CSV → PLANTILLA TANGO ────────────────────────────────
 
