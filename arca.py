@@ -215,7 +215,7 @@ def csv_a_plantilla_tango(csv_bytes: bytes) -> bytes:
             c = ws.cell(row=ri, column=ci, value=val)
             c.font = DFONT
             if ci in DATE_C and isinstance(val, datetime):
-                c.number_format='DD/MM/YYYY'; c.alignment=A_L
+                c.number_format='mm/dd/yyyy'; c.alignment=A_L
             elif ci in RIGHT_C: c.alignment=A_R
             elif ci in TEXT_C:  c.number_format='@'; c.alignment=A_L
             else:               c.alignment=A_L
