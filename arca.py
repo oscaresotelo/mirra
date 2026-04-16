@@ -173,8 +173,16 @@ def csv_a_plantilla_tango(csv_bytes: bytes) -> bytes:
         cod_doc = r.get('Tipo Doc. Receptor','').strip()
         nro_doc = r.get('Nro. Doc. Receptor','').strip()
         nombre  = r.get('Denominación Receptor','').strip()
-        try:    cuit_n = int(nro_doc) if nro_doc and nro_doc!='0' else None
-        except: cuit_n = None
+
+        # ✔️ Consumidor final
+        if cod_doc == '99' or not nro_doc or nro_doc == '0':
+            nombre = 'VENTAS DEL DIA'
+            cuit_n = None
+        else:
+            try:
+                cuit_n = int(nro_doc)
+            except:
+                cuit_n = None
 
         cond_iva = 'RI' if cod_doc=='80' else 'CF'
         cae      = _conv_cae(r.get('Cód. Autorización',''))
@@ -182,7 +190,13 @@ def csv_a_plantilla_tango(csv_bytes: bytes) -> bytes:
         neto21   = float(to_decimal(r.get('Imp. Neto Gravado IVA 21%','0')))
         iva21    = float(to_decimal(r.get('IVA 21%','0')))
         total    = float(to_decimal(r.get('Imp. Total','0')))
+        fecha_str = r.get('Fecha de Emisión','').strip()
+        fecha_parseada = parse_fecha(fecha_str)
 
+        if fecha_parseada != '00000000':
+            fecha = datetime.strptime(fecha_parseada, "%Y%m%d")
+        else:
+            fecha = None
         vals = [lc, f'{pto}-{nro}', td, fecha, fecha,
                 nombre, cod_doc, cuit_n, cond_iva,
                 None,'14',None,None,None,None,None,None,None,None,
@@ -193,7 +207,7 @@ def csv_a_plantilla_tango(csv_bytes: bytes) -> bytes:
             c = ws.cell(row=ri, column=ci, value=val)
             c.font = DFONT
             if ci in DATE_C and isinstance(val, datetime):
-                c.number_format='m/d/yyyy'; c.alignment=A_L
+                c.number_format='DD/MM/YYYY'; c.alignment=A_L
             elif ci in RIGHT_C: c.alignment=A_R
             elif ci in TEXT_C:  c.number_format='@'; c.alignment=A_L
             else:               c.alignment=A_L
