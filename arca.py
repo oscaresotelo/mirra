@@ -252,13 +252,25 @@ def fmt_alfa(valor, largo):
 
 def parse_fecha(s):
     s = str(s).strip()
-    if len(s) == 8 and s.isdigit(): return s
-    s = s[:10]
-    for fmt in ('%d/%m/%Y','%Y-%m-%d','%d-%m-%Y','%Y/%m/%d','%d/%m/%y','%d-%m-%y'):
-        try:    return datetime.strptime(s, fmt).strftime('%Y%m%d')
-        except: pass
-    return '00000000'
+    if len(s) == 8 and s.isdigit():
+        return s
 
+    s = s[:10]
+
+    # 🔥 FORZAMOS FORMATO ARGENTINO (DD/MM/YYYY)
+    try:
+        return datetime.strptime(s, "%d/%m/%Y").strftime('%Y%m%d')
+    except:
+        pass
+
+    # fallback
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).strftime('%Y%m%d')
+        except:
+            pass
+
+    return '00000000'
 def tipo_cbte_txt(t):
     return TIPOS_CBTE.get(str(t).strip().split('.')[0], str(t).zfill(3))
 
